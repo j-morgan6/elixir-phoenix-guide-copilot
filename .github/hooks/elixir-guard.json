@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "./hooks/elixir-hook.sh pre bash",
+        "powershell": ".\\hooks\\elixir-hook.ps1 pre bash",
+        "cwd": ".",
+        "timeoutSec": 15
+      },
+      {
+        "type": "command",
+        "bash": "./hooks/elixir-hook.sh pre edit",
+        "powershell": ".\\hooks\\elixir-hook.ps1 pre edit",
+        "cwd": ".",
+        "timeoutSec": 15
+      }
+    ],
+    "postToolUse": [
+      {
+        "type": "command",
+        "bash": "./hooks/elixir-hook.sh post edit",
+        "powershell": ".\\hooks\\elixir-hook.ps1 post edit",
+        "cwd": ".",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
