@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 # elixir-hook.sh — Elixir/Phoenix guard hooks for Copilot plugin
 #
-# Called by Copilot's PreToolUse/PostToolUse hooks (configured in hooks.json).
+# Called by Copilot's PreToolUse/PostToolUse hooks (configured in elixir-guard.json).
 # Receives hook JSON on stdin, runs Elixir/Phoenix code checks.
 #
 # Usage: echo '{"tool_input":{"command":"..."}}' | elixir-hook.sh <pre|post> <bash|edit>
 #
 # Exit codes:
-#   0 — Allow (with optional advisory message on stderr)
+#   0 — Allow (with optional advisory emitted as {"additionalContext": "..."} JSON on stdout)
 #   2 — Deny (block the tool call in PreToolUse context)
+#
+# NOTE: Copilot parses stdout as hook-output JSON on exit 0 — plain stderr text
+# is dropped. Advisories MUST go through emit_context() below, never a bare
+# `echo ... >&2`.
 
 set -uo pipefail
 
@@ -26,6 +30,22 @@ INPUT=$(cat)
 # Detect jq availability
 HAS_JQ=false
 command -v jq > /dev/null 2>&1 && HAS_JQ=true
+
+# emit_context $1=advisory text -- emits the advisory as hook-output JSON on
+# stdout (Copilot parses stdout as JSON on exit 0; stderr text is dropped) and
+# exits 0 (allow).
+emit_context() {
+  if [ "$HAS_JQ" = "true" ]; then
+    jq -cn --arg msg "$1" '{"additionalContext": $msg}'
+  else
+    # Pure bash fallback: minimal JSON string escaping (backslash, quote, newline)
+    local escaped="${1//\\/\\\\}"
+    escaped="${escaped//\"/\\\"}"
+    escaped="${escaped//$'\n'/\\n}"
+    printf '{"additionalContext": "%s"}\n' "$escaped"
+  fi
+  exit 0
+}
 
 # Extract fields from hook JSON
 extract_json_field() {
@@ -229,28 +249,28 @@ check_edit_pre() {
   local collapsed
   collapsed=$(echo "$content" | tr '\n' ' ')
   if echo "$collapsed" | grep -qE 'if\s+[^d]+\s+do\s+[^e]*if\s+[^d]+\s+do'; then
-    echo 'Warning: Nested if/else detected. Replace with case or multi-clause function.' >&2
+    emit_context "Warning: Nested if/else detected. Replace with case or multi-clause function."
   fi
 
   # Hook: Inefficient Enum chains
   if echo "$collapsed" | grep -qE '\|>\s*Enum\.(map|filter)\([^)]+\)\s*\|>\s*Enum\.(map|filter)\('; then
-    echo 'Warning: Multiple Enum.map/filter chain detected. Use a for comprehension or combine into one pass.' >&2
+    emit_context "Warning: Multiple Enum.map/filter chain detected. Use a for comprehension or combine into one pass."
   fi
 
   # Hook: String concatenation in loops
   if grep -qE 'Enum\.(map|reduce|each).*<>' <<< "$content" 2>/dev/null; then
-    echo 'Warning: String concatenation with <> in Enum operations. Use IO lists or Enum.join.' >&2
+    emit_context "Warning: String concatenation with <> in Enum operations. Use IO lists or Enum.join."
   fi
 
   # Hook: auto_upload warning
   if [ "$HAS_LV" != 'false' ] && grep -qE 'auto_upload:\s*true' <<< "$content" 2>/dev/null; then
-    echo 'Warning: auto_upload: true detected. Requires handle_progress/3. Most apps should use manual upload.' >&2
+    emit_context "Warning: auto_upload: true detected. Requires handle_progress/3. Most apps should use manual upload."
   fi
 
   # Hook: Debug statements (not in test files)
   if [ "$is_test" = "false" ] && [ "$ext" != "heex" ]; then
     if grep -qE 'IO\.inspect\(|dbg\(|IO\.puts\(' <<< "$content" 2>/dev/null; then
-      echo 'Warning: Debug statement detected (IO.inspect, dbg, or IO.puts). Remove before committing.' >&2
+      emit_context "Warning: Debug statement detected (IO.inspect, dbg, or IO.puts). Remove before committing."
     fi
   fi
 
@@ -270,28 +290,28 @@ check_edit_pre() {
       issues="${issues}\n   - Adding NOT NULL without default. This locks the table on large datasets."
     fi
     if [ -n "$issues" ]; then
-      echo -e "Warning: Migration Safety Check:$issues" >&2
+      emit_context "$(echo -e "Warning: Migration Safety Check:$issues")"
     fi
   fi
 
   # Hook: Warn on raw/1 (XSS) — not in test files
   if [ "$is_test" = "false" ]; then
     if grep -qE '(^|[^a-zA-Z_])raw\(|Phoenix\.HTML\.raw\(' <<< "$content" 2>/dev/null; then
-      echo 'Warning: raw/1 detected — XSS risk! Remove raw/1 and let Phoenix auto-escape, or sanitize with HtmlSanitizeEx.' >&2
+      emit_context "Warning: raw/1 detected — XSS risk! Remove raw/1 and let Phoenix auto-escape, or sanitize with HtmlSanitizeEx."
     fi
   fi
 
   # Hook: Sensitive data in Logger
   if [ "$is_test" = "false" ] && [ "$ext" != "heex" ]; then
     if grep -qE 'Logger\.(info|warn|warning|error|debug|notice)\(.*\b(password|token|secret|api_key|credentials|private_key)\b' <<< "$content" 2>/dev/null; then
-      echo 'Warning: Sensitive data in Logger call detected! Redact before logging.' >&2
+      emit_context "Warning: Sensitive data in Logger call detected! Redact before logging."
     fi
   fi
 
   # Hook: Timing-unsafe comparison
   if [ "$is_test" = "false" ] && [ "$ext" != "heex" ]; then
     if grep -qE '(token|secret|api_key|password_hash|digest|signature)\s*==\s*|==\s*(token|secret|api_key|password_hash|digest|signature)' <<< "$content" 2>/dev/null; then
-      echo 'Warning: Timing-unsafe comparison with secret/token! Use Plug.Crypto.secure_compare/2.' >&2
+      emit_context "Warning: Timing-unsafe comparison with secret/token! Use Plug.Crypto.secure_compare/2."
     fi
   fi
 
@@ -315,69 +335,72 @@ check_edit_post() {
   local is_test=false
   echo "$file_path" | grep -qE '_test\.exs$|/test/' && is_test=true
 
-  # Hook: Skill invocation reminder (Elixir/HEEx files only)
+  # NOTE: emit_context() exits immediately (Copilot's hook-output contract only
+  # supports one JSON object on stdout per invocation), so only the first
+  # matching advisory below is ever surfaced. Checks are ordered so the more
+  # specific, actionable warnings run before the generic skill-invocation
+  # reminder, which is deliberately last as a fallback.
+
+  # Hook: mix.exs security audit reminder
+  if echo "$file_path" | grep -qE 'mix\.exs$'; then
+    emit_context "Dependencies file (mix.exs) modified. Consider running: mix deps.audit, mix hex.audit, mix sobelow"
+  fi
+
+  # Remaining checks only apply to .ex/.exs files; heex/other extensions fall
+  # through to the generic reminder below.
   case "$ext" in
-    ex|exs|heex)
-      if [ "$HAS_LV" = 'false' ]; then
-        echo 'Reminder: API-only project detected (no LiveView). LiveView skills/hooks are inactive. Did you invoke the relevant elixir-phoenix-guide skill?' >&2
-      else
-        echo 'Reminder: Did you invoke the relevant elixir-phoenix-guide skill before writing this file? If not, invoke it now and verify your code follows the rules.' >&2
+    ex|exs)
+      local content=""
+      [ -f "$file_path" ] && content=$(cat "$file_path" 2>/dev/null || echo "")
+
+      if [ -n "$content" ]; then
+        # Hook: Code quality analysis (if Elixir is available) — stdout
+        # suppressed since it prints plain text, not hook-output JSON.
+        if command -v elixir >/dev/null 2>&1 && [ -f "$PLUGIN_ROOT/scripts/code_quality.exs" ]; then
+          elixir "$PLUGIN_ROOT/scripts/code_quality.exs" all "$file_path" >/dev/null 2>&1 || true
+        fi
+
+        # Hook: Missing preload warning (not in test files)
+        if [ "$is_test" = "false" ]; then
+          if echo "$content" | grep -qE '\.(posts|comments|users|items|entries|tasks|categories|tags|orders|products|messages|notifications|accounts|roles|permissions|memberships|addresses|invoices|images|attachments|events|sessions|tokens)\b' \
+             && ! echo "$content" | grep -qE 'preload|Repo\.preload|from.*preload|join.*assoc'; then
+            emit_context "Warning: Possible missing preload — association accessor found without a visible preload."
+          fi
+        fi
+
+        # Hook: with missing else clause
+        if echo "$content" | grep -qE 'with\s' && ! echo "$content" | grep -qE 'with.*do.*else|else\s*do'; then
+          local collapsed
+          collapsed=$(echo "$content" | tr '\n' ' ')
+          if echo "$collapsed" | grep -qE 'with\s+[^}]+<-[^}]+do\s+[^}]+end' \
+             && ! echo "$collapsed" | grep -qE 'with\s+[^}]+<-[^}]+do\s+[^}]+else[^}]+end'; then
+            emit_context "Warning: with statement without else clause. Add an else clause to handle errors."
+          fi
+        fi
+
+        # Hook: Repo calls in LiveView (context boundary violation)
+        if [ "$HAS_LV" != 'false' ]; then
+          if echo "$file_path" | grep -qE '_live\.ex$|_live/|live/'; then
+            if grep -qE 'Repo\.(all|one|get|get!|get_by|insert|update|delete|aggregate|exists\?|preload)' <<< "$content" 2>/dev/null; then
+              emit_context "Warning: Context boundary violation — Repo called directly in a LiveView module. Use context functions instead."
+            fi
+          fi
+        fi
       fi
       ;;
   esac
 
-  # Hook: mix.exs security audit reminder
-  if echo "$file_path" | grep -qE 'mix\.exs$'; then
-    echo 'Dependencies file (mix.exs) modified. Consider running: mix deps.audit, mix hex.audit, mix sobelow' >&2
-  fi
-
-  # Hook: Template duplication (HEEx files)
-  if [ "$ext" = "heex" ] && [ -f "$PLUGIN_ROOT/scripts/detect_template_duplication.sh" ]; then
-    bash "$PLUGIN_ROOT/scripts/detect_template_duplication.sh" "$file_path" 2>/dev/null || true
-    exit 0
-  fi
-
-  # Only continue for .ex/.exs files
+  # Hook: Skill invocation reminder (Elixir/HEEx files only) — fallback when
+  # no more specific advisory above already fired.
   case "$ext" in
-    ex|exs) ;;
-    *) exit 0 ;;
-  esac
-
-  local content=""
-  [ -f "$file_path" ] && content=$(cat "$file_path" 2>/dev/null || echo "")
-  [ -n "$content" ] || exit 0
-
-  # Hook: Code quality analysis (if Elixir is available)
-  if command -v elixir >/dev/null 2>&1 && [ -f "$PLUGIN_ROOT/scripts/code_quality.exs" ]; then
-    elixir "$PLUGIN_ROOT/scripts/code_quality.exs" all "$file_path" 2>/dev/null || true
-  fi
-
-  # Hook: Missing preload warning (not in test files)
-  if [ "$is_test" = "false" ]; then
-    if echo "$content" | grep -qE '\.(posts|comments|users|items|entries|tasks|categories|tags|orders|products|messages|notifications|accounts|roles|permissions|memberships|addresses|invoices|images|attachments|events|sessions|tokens)\b' \
-       && ! echo "$content" | grep -qE 'preload|Repo\.preload|from.*preload|join.*assoc'; then
-      echo 'Warning: Possible missing preload — association accessor found without a visible preload.' >&2
-    fi
-  fi
-
-  # Hook: with missing else clause
-  if echo "$content" | grep -qE 'with\s' && ! echo "$content" | grep -qE 'with.*do.*else|else\s*do'; then
-    local collapsed
-    collapsed=$(echo "$content" | tr '\n' ' ')
-    if echo "$collapsed" | grep -qE 'with\s+[^}]+<-[^}]+do\s+[^}]+end' \
-       && ! echo "$collapsed" | grep -qE 'with\s+[^}]+<-[^}]+do\s+[^}]+else[^}]+end'; then
-      echo 'Warning: with statement without else clause. Add an else clause to handle errors.' >&2
-    fi
-  fi
-
-  # Hook: Repo calls in LiveView (context boundary violation)
-  if [ "$HAS_LV" != 'false' ]; then
-    if echo "$file_path" | grep -qE '_live\.ex$|_live/|live/'; then
-      if grep -qE 'Repo\.(all|one|get|get!|get_by|insert|update|delete|aggregate|exists\?|preload)' <<< "$content" 2>/dev/null; then
-        echo 'Warning: Context boundary violation — Repo called directly in a LiveView module. Use context functions instead.' >&2
+    ex|exs|heex)
+      if [ "$HAS_LV" = 'false' ]; then
+        emit_context "Reminder: API-only project detected (no LiveView). LiveView skills/hooks are inactive. Did you invoke the relevant elixir-phoenix-guide skill?"
+      else
+        emit_context "Reminder: Did you invoke the relevant elixir-phoenix-guide skill before writing this file? If not, invoke it now and verify your code follows the rules."
       fi
-    fi
-  fi
+      ;;
+  esac
 
   exit 0
 }

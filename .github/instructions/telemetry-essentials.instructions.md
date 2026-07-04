@@ -7,7 +7,7 @@ applyTo: "**/*.ex"
 ## RULES — Follow these with no exceptions
 
 1. **Use structured logging (`Logger.info("action", key: value)`)** — never string interpolation in log messages; structured logs are searchable and parseable
-2. **Attach telemetry handlers in `Application.start/2`** — not in modules that may restart; handler attachment is not idempotent
+2. **Attach telemetry handlers in `Application.start/2`** — `:telemetry.attach/4` with an existing handler ID returns `{:error, :already_exists}`, so it never double-attaches; attach at boot anyway, since handlers detach permanently if they raise and boot-time attachment gives them a stable lifecycle
 3. **Use `Ecto.Repo` telemetry events for query monitoring** — don't wrap every query manually; Ecto already emits events
 4. **Use `Phoenix.LiveDashboard` in dev/staging** — it's free observability with zero code
 5. **Tag telemetry events with metadata (user_id, request_id)** — without correlation IDs, distributed traces are useless
@@ -32,6 +32,10 @@ Logger.error("Failed to process payment for user #{user.id}: #{inspect(reason)}"
 Logger.info("Order created", user_id: user.id, order_id: order.id, total: order.total)
 Logger.error("Payment failed", user_id: user.id, reason: inspect(reason))
 ```
+
+Keyword data goes to Logger *metadata* and is dropped unless whitelisted — add the keys to
+`config :logger, :default_formatter, metadata: [...]` (or `metadata: :all` in dev). Passing
+`user_id: user.id` doesn't help if `:user_id` isn't in that list — it's silently discarded.
 
 ### Logger Metadata
 
@@ -91,11 +95,15 @@ The `:telemetry` library is the standard for metrics in the BEAM ecosystem. Libr
 
 ### Attaching Handlers
 
-Always attach in `Application.start/2` — handler attachment is **not idempotent** and modules may restart.
+`:telemetry.attach/4` called with an existing handler ID returns `{:error, :already_exists}` —
+it never double-attaches. Attach at boot anyway: handlers detach permanently if they raise, and
+boot-time attachment gives them a stable lifecycle instead of one tied to a GenServer that may
+restart independently.
 
 **Bad:**
 ```elixir
-# In a GenServer init — if GenServer restarts, handlers are attached again
+# In a GenServer init — ties the handler's lifecycle to this process instead of boot;
+# if the handler function ever raises, it detaches permanently and silently
 defmodule MyApp.MetricsServer do
   def init(_) do
     :telemetry.attach("order-handler", [:my_app, :orders, :created], &handle/4, nil)
@@ -137,7 +145,7 @@ defmodule MyApp.Telemetry do
 
   def handle_event([:my_app, :orders, :created], measurements, metadata, _config) do
     Logger.info("Order created",
-      total_cents: measurements.count,
+      total_cents: measurements.total_cents,
       user_id: metadata.user_id
     )
   end
@@ -378,25 +386,9 @@ TelemetryMetricsPrometheus.child_spec(metrics: MyAppWeb.Telemetry.metrics())
 
 ## Production Log Levels
 
-```elixir
-# config/prod.exs — default to :info
-config :logger, level: :info
+Default to `:info` in production — `:debug` logs SQL query parameters, which is a PII risk.
 
-# config/runtime.exs — allow override for debugging
-if config_env() == :prod do
-  if log_level = System.get_env("LOG_LEVEL") do
-    config :logger, level: String.to_existing_atom(log_level)
-  end
-end
-```
-
-**What each level logs:**
-| Level | Includes | Production Use |
-|-------|----------|---------------|
-| `:debug` | SQL params, internal state | Never (PII risk) |
-| `:info` | Requests, business events | Default |
-| `:warning` | Recoverable issues | Always |
-| `:error` | Failures needing attention | Always |
+> Production log level config lives in the **deployment-gotchas** skill (§7).
 
 ---
 

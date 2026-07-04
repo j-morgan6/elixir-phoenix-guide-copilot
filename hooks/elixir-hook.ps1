@@ -1,13 +1,22 @@
 # elixir-hook.ps1 — Elixir/Phoenix guard hooks for Copilot plugin (PowerShell)
 #
-# Called by Copilot's PreToolUse/PostToolUse hooks (configured in hooks.json).
+# Called by Copilot's PreToolUse/PostToolUse hooks (configured in elixir-guard.json).
 # Receives hook JSON on stdin, runs Elixir/Phoenix code checks.
 #
 # Usage: echo '{"tool_input":{"command":"..."}}' | powershell -File elixir-hook.ps1 <pre|post> <bash|edit>
 #
 # Exit codes:
-#   0 — Allow (with optional advisory message on stderr)
+#   0 — Allow (with optional advisory emitted as {"additionalContext": "..."} JSON on stdout)
 #   2 — Deny (block the tool call in PreToolUse context)
+#
+# NOTE: Copilot parses stdout as hook-output JSON on exit 0 — plain stderr text
+# is dropped. Advisories go through Emit-Context below, never a bare Write-Error.
+#
+# KNOWN GAP (tracked, not fixed here): the Deny paths in this file still use
+# Write-Error + exit 2 instead of a {"permissionDecision":"deny",...} JSON
+# object on stdout, unlike the corresponding elixir-hook.sh, whose deny paths
+# already emit correct JSON. Reworking every deny site here is a larger,
+# separate change — see project notes.
 
 param(
     [string]$Phase,
@@ -35,6 +44,16 @@ try {
 # Extract tool args
 $ToolArgs = if ($HookInput.tool_input) { $HookInput.tool_input } elseif ($HookInput.toolArgs) { $HookInput.toolArgs } else { $null }
 $Cwd = if ($HookInput.cwd) { $HookInput.cwd } else { "" }
+
+# Emit-Context -Message <advisory text> -- emits the advisory as hook-output
+# JSON on stdout (Copilot parses stdout as JSON on exit 0; stderr is dropped)
+# and exits 0 (allow).
+function Emit-Context {
+    param([string]$Message)
+    $obj = @{ additionalContext = $Message }
+    Write-Output ($obj | ConvertTo-Json -Compress)
+    exit 0
+}
 
 # Use CWD from JSON if available, fall back to PWD
 $ProjectDir = if ($Cwd) { $Cwd } else { $PWD.Path }
@@ -224,28 +243,28 @@ function Check-EditPre {
     # Hook: Nested if/else
     $collapsed = $content -replace "`n", " "
     if ($collapsed -match 'if\s+[^d]+\s+do\s+[^e]*if\s+[^d]+\s+do') {
-        Write-Error 'Warning: Nested if/else detected. Replace with case or multi-clause function.'
+        Emit-Context 'Warning: Nested if/else detected. Replace with case or multi-clause function.'
     }
 
     # Hook: Inefficient Enum chains
     if ($collapsed -match '\|>\s*Enum\.(map|filter)\([^)]+\)\s*\|>\s*Enum\.(map|filter)\(') {
-        Write-Error 'Warning: Multiple Enum.map/filter chain detected. Use a for comprehension or combine into one pass.'
+        Emit-Context 'Warning: Multiple Enum.map/filter chain detected. Use a for comprehension or combine into one pass.'
     }
 
     # Hook: String concatenation in loops
     if ($content -match 'Enum\.(map|reduce|each).*<>') {
-        Write-Error 'Warning: String concatenation with <> in Enum operations. Use IO lists or Enum.join.'
+        Emit-Context 'Warning: String concatenation with <> in Enum operations. Use IO lists or Enum.join.'
     }
 
     # Hook: auto_upload warning
     if ($HasLV -ne 'false' -and ($content -match 'auto_upload:\s*true')) {
-        Write-Error 'Warning: auto_upload: true detected. Requires handle_progress/3. Most apps should use manual upload.'
+        Emit-Context 'Warning: auto_upload: true detected. Requires handle_progress/3. Most apps should use manual upload.'
     }
 
     # Hook: Debug statements (not in test files)
     if (-not $isTest -and $ext -ne 'heex') {
         if ($content -match 'IO\.inspect\(|dbg\(|IO\.puts\(') {
-            Write-Error 'Warning: Debug statement detected (IO.inspect, dbg, or IO.puts). Remove before committing.'
+            Emit-Context 'Warning: Debug statement detected (IO.inspect, dbg, or IO.puts). Remove before committing.'
         }
     }
 
@@ -265,28 +284,28 @@ function Check-EditPre {
             $issues += "`n   - Adding NOT NULL without default. This locks the table on large datasets."
         }
         if ($issues) {
-            Write-Error "Warning: Migration Safety Check:$issues"
+            Emit-Context "Warning: Migration Safety Check:$issues"
         }
     }
 
     # Hook: Warn on raw/1 (XSS) — not in test files
     if (-not $isTest) {
         if ($content -match '(^|[^a-zA-Z_])raw\(|Phoenix\.HTML\.raw\(') {
-            Write-Error 'Warning: raw/1 detected — XSS risk! Remove raw/1 and let Phoenix auto-escape, or sanitize with HtmlSanitizeEx.'
+            Emit-Context 'Warning: raw/1 detected — XSS risk! Remove raw/1 and let Phoenix auto-escape, or sanitize with HtmlSanitizeEx.'
         }
     }
 
     # Hook: Sensitive data in Logger
     if (-not $isTest -and $ext -ne 'heex') {
         if ($content -match 'Logger\.(info|warn|warning|error|debug|notice)\(.*\b(password|token|secret|api_key|credentials|private_key)\b') {
-            Write-Error 'Warning: Sensitive data in Logger call detected! Redact before logging.'
+            Emit-Context 'Warning: Sensitive data in Logger call detected! Redact before logging.'
         }
     }
 
     # Hook: Timing-unsafe comparison
     if (-not $isTest -and $ext -ne 'heex') {
         if ($content -match '(token|secret|api_key|password_hash|digest|signature)\s*==\s*|==\s*(token|secret|api_key|password_hash|digest|signature)') {
-            Write-Error 'Warning: Timing-unsafe comparison with secret/token! Use Plug.Crypto.secure_compare/2.'
+            Emit-Context 'Warning: Timing-unsafe comparison with secret/token! Use Plug.Crypto.secure_compare/2.'
         }
     }
 
@@ -304,65 +323,68 @@ function Check-EditPost {
     $ext = [System.IO.Path]::GetExtension($filePath).TrimStart('.')
     $isTest = $filePath -match '_test\.exs$|/test/'
 
-    # Hook: Skill invocation reminder (Elixir/HEEx files only)
-    if ($ext -in @('ex', 'exs', 'heex')) {
-        if ($HasLV -eq 'false') {
-            Write-Error 'Reminder: API-only project detected (no LiveView). LiveView skills/hooks are inactive. Did you invoke the relevant elixir-phoenix-guide skill?'
-        } else {
-            Write-Error 'Reminder: Did you invoke the relevant elixir-phoenix-guide skill before writing this file? If not, invoke it now and verify your code follows the rules.'
-        }
-    }
+    # NOTE: Emit-Context exits immediately (Copilot's hook-output contract only
+    # supports one JSON object on stdout per invocation), so only the first
+    # matching advisory below is ever surfaced. Checks are ordered so the more
+    # specific, actionable warnings run before the generic skill-invocation
+    # reminder, which is deliberately last as a fallback.
 
     # Hook: mix.exs security audit reminder
     if ($filePath -match 'mix\.exs$') {
-        Write-Error 'Dependencies file (mix.exs) modified. Consider running: mix deps.audit, mix hex.audit, mix sobelow'
+        Emit-Context 'Dependencies file (mix.exs) modified. Consider running: mix deps.audit, mix hex.audit, mix sobelow'
     }
 
-    # Hook: Template duplication (HEEx files)
-    $DuplicationScript = Join-Path $PluginRoot "scripts/detect_template_duplication.sh"
-    if ($ext -eq 'heex' -and (Test-Path $DuplicationScript)) {
-        try { bash $DuplicationScript $filePath 2>$null } catch {}
-        exit 0
-    }
-
-    # Only continue for .ex/.exs files
-    if ($ext -notin @('ex', 'exs')) { exit 0 }
-
-    $content = ""
-    if (Test-Path $filePath) {
-        $content = Get-Content $filePath -Raw -ErrorAction SilentlyContinue
-    }
-    if (-not $content) { exit 0 }
-
-    # Hook: Code quality analysis (if Elixir is available)
-    $QualityScript = Join-Path $PluginRoot "scripts/code_quality.exs"
-    if ((Get-Command elixir -ErrorAction SilentlyContinue) -and (Test-Path $QualityScript)) {
-        try { elixir $QualityScript all $filePath 2>$null } catch {}
-    }
-
-    # Hook: Missing preload warning (not in test files)
-    if (-not $isTest) {
-        if ($content -match '\.(posts|comments|users|items|entries|tasks|categories|tags|orders|products|messages|notifications|accounts|roles|permissions|memberships|addresses|invoices|images|attachments|events|sessions|tokens)\b' -and
-            $content -notmatch 'preload|Repo\.preload|from.*preload|join.*assoc') {
-            Write-Error 'Warning: Possible missing preload — association accessor found without a visible preload.'
+    # Remaining checks only apply to .ex/.exs files; heex/other extensions fall
+    # through to the generic reminder below.
+    if ($ext -in @('ex', 'exs')) {
+        $content = ""
+        if (Test-Path $filePath) {
+            $content = Get-Content $filePath -Raw -ErrorAction SilentlyContinue
         }
-    }
 
-    # Hook: with missing else clause
-    if ($content -match 'with\s' -and $content -notmatch 'with.*do.*else|else\s*do') {
-        $collapsed = $content -replace "`n", " "
-        if ($collapsed -match 'with\s+[^}]+<-[^}]+do\s+[^}]+end' -and
-            $collapsed -notmatch 'with\s+[^}]+<-[^}]+do\s+[^}]+else[^}]+end') {
-            Write-Error 'Warning: with statement without else clause. Add an else clause to handle errors.'
-        }
-    }
-
-    # Hook: Repo calls in LiveView (context boundary violation)
-    if ($HasLV -ne 'false') {
-        if ($filePath -match '_live\.ex$|_live/|live/') {
-            if ($content -match 'Repo\.(all|one|get|get!|get_by|insert|update|delete|aggregate|exists\?|preload)') {
-                Write-Error 'Warning: Context boundary violation — Repo called directly in a LiveView module. Use context functions instead.'
+        if ($content) {
+            # Hook: Code quality analysis (if Elixir is available) — stdout
+            # suppressed since it prints plain text, not hook-output JSON.
+            $QualityScript = Join-Path $PluginRoot "scripts/code_quality.exs"
+            if ((Get-Command elixir -ErrorAction SilentlyContinue) -and (Test-Path $QualityScript)) {
+                try { elixir $QualityScript all $filePath *> $null } catch {}
             }
+
+            # Hook: Missing preload warning (not in test files)
+            if (-not $isTest) {
+                if ($content -match '\.(posts|comments|users|items|entries|tasks|categories|tags|orders|products|messages|notifications|accounts|roles|permissions|memberships|addresses|invoices|images|attachments|events|sessions|tokens)\b' -and
+                    $content -notmatch 'preload|Repo\.preload|from.*preload|join.*assoc') {
+                    Emit-Context 'Warning: Possible missing preload — association accessor found without a visible preload.'
+                }
+            }
+
+            # Hook: with missing else clause
+            if ($content -match 'with\s' -and $content -notmatch 'with.*do.*else|else\s*do') {
+                $collapsed = $content -replace "`n", " "
+                if ($collapsed -match 'with\s+[^}]+<-[^}]+do\s+[^}]+end' -and
+                    $collapsed -notmatch 'with\s+[^}]+<-[^}]+do\s+[^}]+else[^}]+end') {
+                    Emit-Context 'Warning: with statement without else clause. Add an else clause to handle errors.'
+                }
+            }
+
+            # Hook: Repo calls in LiveView (context boundary violation)
+            if ($HasLV -ne 'false') {
+                if ($filePath -match '_live\.ex$|_live/|live/') {
+                    if ($content -match 'Repo\.(all|one|get|get!|get_by|insert|update|delete|aggregate|exists\?|preload)') {
+                        Emit-Context 'Warning: Context boundary violation — Repo called directly in a LiveView module. Use context functions instead.'
+                    }
+                }
+            }
+        }
+    }
+
+    # Hook: Skill invocation reminder (Elixir/HEEx files only) — fallback when
+    # no more specific advisory above already fired.
+    if ($ext -in @('ex', 'exs', 'heex')) {
+        if ($HasLV -eq 'false') {
+            Emit-Context 'Reminder: API-only project detected (no LiveView). LiveView skills/hooks are inactive. Did you invoke the relevant elixir-phoenix-guide skill?'
+        } else {
+            Emit-Context 'Reminder: Did you invoke the relevant elixir-phoenix-guide skill before writing this file? If not, invoke it now and verify your code follows the rules.'
         }
     }
 

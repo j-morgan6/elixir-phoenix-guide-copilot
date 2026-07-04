@@ -11,7 +11,7 @@ applyTo: "**/*.ex,**/*.exs"
 3. **Set `on_delete` explicitly in migrations** — `:delete_all` for owned children, `:nothing` for references to independent entities
 4. **Always create indexes on foreign key columns** — missing FK indexes cause slow joins and lookups on the child table
 5. **Use `on_replace: :delete` in `cast_assoc` for list management** — allows removing items by omitting them from the input
-6. **Preload associations before updating them** — `cast_assoc` compares against currently loaded data; unloaded associations cause silent data loss
+6. **Preload associations before updating them** — `cast_assoc/3` **raises** (`attempting to cast or change association ... that was not loaded`) if the association isn't preloaded; preload before update
 
 ---
 
@@ -111,7 +111,8 @@ end
 # Bad — ingredients not preloaded, cast_assoc can't compare
 recipe = Repo.get!(Recipe, id)
 Recipe.changeset(recipe, attrs)  # ingredients is %Ecto.Association.NotLoaded{}
-|> Repo.update()  # Silently ignores association changes!
+|> Repo.update()  # Raises: attempting to cast or change association
+                  # `ingredients` from `MyApp.Recipes.Recipe` that was not loaded
 
 # Good — preload before updating
 recipe = Repo.get!(Recipe, id) |> Repo.preload(:ingredients)
@@ -183,8 +184,10 @@ defmodule MyApp.Orders do
           product_id: item.product_id,
           quantity: item.quantity,
           price: item.price,
-          inserted_at: DateTime.utc_now(:second),
-          updated_at: DateTime.utc_now(:second)
+          # default timestamps() are :naive_datetime — use DateTime only if
+          # the schema uses :utc_datetime
+          inserted_at: NaiveDateTime.utc_now(:second),
+          updated_at: NaiveDateTime.utc_now(:second)
         }
       end)
     end)
@@ -263,8 +266,8 @@ end
 ```elixir
 # :delete_all — child cannot exist without parent
 add :comment_id, references(:comments, on_delete: :delete_all)  # Reply → Comment
-add :line_item_id, references(:orders, on_delete: :delete_all)  # LineItem → Order
-add :ingredient_id, references(:recipes, on_delete: :delete_all)  # Ingredient → Recipe
+add :order_id, references(:orders, on_delete: :delete_all), null: false  # LineItem → Order
+add :recipe_id, references(:recipes, on_delete: :delete_all), null: false  # Ingredient → Recipe
 
 # :nothing — resource is referenced but independent
 add :user_id, references(:users, on_delete: :nothing)  # Post → User
@@ -298,63 +301,10 @@ create index(:comments, [:post_id])
 
 ## Testing Nested Associations
 
+One representative test — assert `Ecto.Multi` rolls back all steps atomically on failure:
+
 ```elixir
-describe "create_post/1 with comments" do
-  test "creates post with nested comments" do
-    attrs = %{
-      title: "My Post",
-      comments: [
-        %{body: "Comment 1"},
-        %{body: "Comment 2"}
-      ]
-    }
-
-    assert {:ok, post} = Blog.create_post(attrs)
-    assert post.title == "My Post"
-
-    post = Repo.preload(post, :comments)
-    assert length(post.comments) == 2
-    assert Enum.any?(post.comments, &(&1.body == "Comment 1"))
-  end
-
-  test "rejects invalid nested comments" do
-    attrs = %{
-      title: "My Post",
-      comments: [%{body: nil}]
-    }
-
-    assert {:error, changeset} = Blog.create_post(attrs)
-    assert errors_on(changeset)[:comments]
-  end
-end
-
-describe "update_recipe/2 with on_replace: :delete" do
-  test "removes omitted ingredients" do
-    recipe = recipe_fixture(ingredients: [%{name: "Salt"}, %{name: "Pepper"}])
-    recipe = Repo.preload(recipe, :ingredients)
-
-    # Only send Salt — Pepper should be deleted
-    attrs = %{ingredients: [%{id: hd(recipe.ingredients).id, name: "Salt"}]}
-    assert {:ok, updated} = Recipes.update_recipe(recipe, attrs)
-
-    updated = Repo.preload(updated, :ingredients, force: true)
-    assert length(updated.ingredients) == 1
-    assert hd(updated.ingredients).name == "Salt"
-  end
-end
-
 describe "place_order/2 with Ecto.Multi" do
-  test "creates order and line items atomically" do
-    user = user_fixture()
-    product = product_fixture(stock: 10)
-    items = [%{product_id: product.id, quantity: 2, price: 999}]
-
-    assert {:ok, %{order: order, line_items: {1, _}}} =
-             Orders.place_order(user, items)
-
-    assert order.user_id == user.id
-  end
-
   test "rolls back on failure" do
     user = user_fixture()
     items = [%{product_id: -1, quantity: 2, price: 999}]

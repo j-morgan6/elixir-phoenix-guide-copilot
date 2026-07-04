@@ -12,7 +12,7 @@ applyTo: "**/live/**/*.ex,**/*_live.ex,**/*.html.heex,**/live/**/*.html.heex"
 4. **Use Map.get(assigns, :key, default)** for optional assigns in helper functions
 5. **Return proper tuples** — `{:ok, socket}` from mount, `{:noreply, socket}` from handle_event
 6. **Use `with` for error handling** in event handlers — assign errors to socket, don't crash
-7. **Never use auto_upload: true with form submission** — use manual uploads instead
+7. **`auto_upload: true` works with submit, but entries must be fully uploaded before you consume them** — check `entry.done?` / rely on `consume_uploaded_entries` only after progress completes; default to manual uploads unless you need incremental upload UX
 8. **Check `core_components.ex` for existing components** before creating custom ones
 9. **Never query the database directly from LiveViews** — call context functions instead
 
@@ -191,6 +191,9 @@ def mount(_params, _session, socket) do
 end
 ```
 
+For collections, prefer **streams** (below) — the current recommended mechanism; `temporary_assigns`
+remains useful for one-shot large payloads that aren't managed as a growing/shrinking collection.
+
 ## Flash Messages
 
 Use `put_flash/3` and `clear_flash/2` for user feedback.
@@ -268,13 +271,14 @@ end
 Bind forms to changesets for validation.
 
 ```heex
-<.simple_form for={@form} phx-change="validate" phx-submit="save">
+<%!-- Phoenix 1.8 removed the old simple-form component; use <.form> --%>
+<.form for={@form} phx-change="validate" phx-submit="save">
   <.input field={@form[:title]} label="Title" />
   <.input field={@form[:body]} type="textarea" label="Body" />
   <:actions>
     <.button>Save</.button>
   </:actions>
-</.simple_form>
+</.form>
 ```
 
 ```elixir
@@ -297,24 +301,7 @@ end
 
 ## Error Handling
 
-Always handle errors gracefully in LiveViews.
-
-```elixir
-@impl true
-def handle_event("risky_operation", _params, socket) do
-  case perform_operation() do
-    {:ok, result} ->
-      {:noreply, assign(socket, :result, result)}
-
-    {:error, reason} ->
-      {:noreply, put_flash(socket, :error, "Operation failed: #{reason}")}
-  end
-end
-```
-
-### Error Boundaries
-
-Handle errors in handle_event to prevent LiveView crashes.
+Handle errors in handle_event to prevent LiveView crashes — assign errors to the socket instead of letting the process crash.
 
 ```elixir
 @impl true
@@ -343,35 +330,7 @@ def handle_event("save", params, socket) do
 end
 ```
 
-## PubSub Broadcasting
-
-Use PubSub for real-time updates across LiveViews.
-
-```elixir
-# Subscribe in mount
-@impl true
-def mount(_params, _session, socket) do
-  if connected?(socket) do
-    Phoenix.PubSub.subscribe(MyApp.PubSub, "posts")
-  end
-
-  {:ok, assign(socket, :posts, list_posts())}
-end
-
-# Broadcast when data changes
-def create_post(attrs) do
-  with {:ok, post} <- Repo.insert(changeset) do
-    Phoenix.PubSub.broadcast(MyApp.PubSub, "posts", {:post_created, post})
-    {:ok, post}
-  end
-end
-
-# Handle broadcast
-@impl true
-def handle_info({:post_created, post}, socket) do
-  {:noreply, update(socket, :posts, fn posts -> [post | posts] end)}
-end
-```
+> Real-time updates: see the **phoenix-pubsub-patterns** skill.
 
 ## Testing
 
@@ -379,50 +338,11 @@ When writing LiveView tests, invoke `elixir-phoenix-guide:testing-essentials` be
 
 ## Common Lifecycle Mistakes
 
-### ❌ Mistake 1: Assuming Assigns Exist
+Mistakes 1 (uninitialized assigns) and 2 (subscribing without `connected?`) are covered by
+rules 2 and 3 above and the Two-Phase Rendering section. One more pitfall isn't covered by
+either rule:
 
-```elixir
-def render(assigns) do
-  ~H"""
-  <p>Count: <%= @count %></p>  <!-- Crash if @count not initialized -->
-  """
-end
-```
-
-### ✅ Fix: Initialize before render (mount or handle_params)
-
-```elixir
-@impl true
-def mount(_params, _session, socket) do
-  {:ok, assign(socket, :count, 0)}
-end
-```
-
-### ❌ Mistake 2: Subscribing in Both Phases
-
-```elixir
-@impl true
-def mount(_params, _session, socket) do
-  # BAD - Subscribes during static render (doesn't work)
-  Phoenix.PubSub.subscribe(MyApp.PubSub, "topic")
-  {:ok, socket}
-end
-```
-
-### ✅ Fix: Check connected?
-
-```elixir
-@impl true
-def mount(_params, _session, socket) do
-  if connected?(socket) do
-    Phoenix.PubSub.subscribe(MyApp.PubSub, "topic")
-  end
-
-  {:ok, socket}
-end
-```
-
-### ❌ Mistake 3: Expensive Operations in Both Phases
+### ❌ Expensive Operations in Both Phases
 
 ```elixir
 @impl true

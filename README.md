@@ -1,6 +1,6 @@
 # Elixir Phoenix Guide — GitHub Copilot Edition
 
-A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 27 hooks that automatically enforce code quality and security rules on every file write, agent docs for deep-dive assistance, and 4 analysis scripts that detect duplication, complexity, and project configuration.
+A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 26 hooks that automatically enforce code quality and security rules on every file write, agent docs for deep-dive assistance, and 3 analysis scripts that detect complexity, unused code, and project configuration.
 
 ## Installation
 
@@ -52,7 +52,6 @@ your-project/
 │   └── elixir-hook.ps1                  # Hook script (PowerShell)
 ├── scripts/
 │   ├── code_quality.exs                 # Elixir static analysis
-│   ├── detect_template_duplication.sh   # HEEx duplication detection
 │   ├── detect_project.sh                # Project capability detection
 │   └── run_analysis.sh                  # Full analysis suite
 └── AGENTS.md                            # Agent guidance for Ecto, LiveView, structure, testing
@@ -86,7 +85,7 @@ Each instruction is automatically loaded by Copilot when you edit files matching
 | `deployment-gotchas` | `**/config/**/*.exs,**/rel/**/*,**/Dockerfile` |
 | `telemetry-essentials` | `**/*.ex` |
 
-### 27 Hooks (21 PreToolUse + 6 PostToolUse)
+### 26 Hooks (21 PreToolUse + 5 PostToolUse)
 
 Hooks run automatically via `.github/hooks/elixir-guard.json` and enforce rules on every tool call.
 
@@ -99,7 +98,7 @@ Hooks run automatically via `.github/hooks/elixir-guard.json` and enforce rules 
 | **OTP / LiveView** | Missing `@impl true` before callbacks, `static_paths` mismatch | Repo called directly in LiveView, missing preload |
 | **Code style** | -- | Nested if/else, chained Enum.map/filter, string concat in loops |
 | **Migrations** | -- | Missing FK index, missing on_delete, unsafe column removal, NOT NULL without default |
-| **Post-write reminders** | -- | Skill invocation reminder, mix.exs security audit, template duplication, code quality analysis, `with` missing else, context boundary violations |
+| **Post-write reminders** | -- | Skill invocation reminder, mix.exs security audit, code quality analysis, `with` missing else, context boundary violations |
 
 ### Agent Docs (AGENTS.md)
 
@@ -109,12 +108,11 @@ Consolidated guidance covering:
 - **Project Structure** -- directory layout, context organization, file naming
 - **Testing Guide** -- ExUnit patterns, DataCase/ConnCase, test organization
 
-### 4 Analysis Scripts
+### 3 Analysis Scripts
 
 | Script | Purpose |
 |--------|---------|
 | `code_quality.exs` | Elixir static analysis -- complexity, duplication, and unused function detection |
-| `detect_template_duplication.sh` | Finds repeated HEEx template blocks that could be extracted into components |
 | `detect_project.sh` | Detects project capabilities (LiveView, Oban, Scope, etc.) and writes a cache file for context-aware hooks |
 | `run_analysis.sh` | Runs the full suite of analysis scripts against the current project |
 
