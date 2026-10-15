@@ -8,6 +8,7 @@
 #
 #   /bin/bash tests/run_tests.sh            # bash hook (also exercises bash 3.2)
 #   PWSH=/path/to/pwsh /bin/bash tests/run_tests.sh ps1   # PowerShell hook
+#   PWSH=powershell bash tests/run_tests.sh ps1           # Windows PowerShell 5.1 (Git Bash)
 #
 # Needs jq (the harness builds payloads with it) and git.
 set -u
@@ -21,13 +22,22 @@ case "$TARGET" in
   sh) HOOK=("$SH" "$ROOT/hooks/elixir-hook.sh") ;;
   ps1)
     PWSH="${PWSH:-$(command -v pwsh 2>/dev/null)}"
-    [ -n "$PWSH" ] && [ -x "$PWSH" ] || { echo "pwsh not found: set PWSH=/path/to/pwsh"; exit 1; }
+    if [ -z "$PWSH" ] || ! command -v "$PWSH" >/dev/null 2>&1; then
+      echo "pwsh not found: set PWSH=/path/to/pwsh (or PWSH=powershell for Windows PowerShell 5.1)"; exit 1
+    fi
     HOOK=("$PWSH" -NoProfile -NonInteractive -File "$ROOT/hooks/elixir-hook.ps1") ;;
   *) echo "usage: $0 [sh|ps1]"; exit 1 ;;
 esac
 
 TMP="$(mktemp -d)"
 TMP="$(cd "$TMP" && pwd -P)"
+# On Windows (Git Bash), native PowerShell can't read /c/... paths inside the
+# JSON payloads; C:/... form works for both bash and PowerShell.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*)
+    TMP="$(cygpath -m "$TMP")"; ROOT="$(cygpath -m "$ROOT")"; FIXSRC="$ROOT/tests/fixtures"
+    [ "$TARGET" = ps1 ] && HOOK=("$PWSH" -NoProfile -NonInteractive -File "$ROOT/hooks/elixir-hook.ps1") ;;
+esac
 trap 'rm -rf "$TMP"' EXIT
 unset EPG_ALLOW MIX_ENV 2>/dev/null || true
 
@@ -64,8 +74,11 @@ expect_advise() { # name json pattern  (post edit)
 
 expect_clean() { # name phase type json
   run "$2" "$3" "$4"
-  [ "$RC" -eq 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ] || { bad "$1" "exit $RC stdout=[$OUT] stderr=[$ERR] (want silent exit 0)"; return; }
-  ok
+  if [ "$RC" -eq 0 ] && [ -z "$OUT" ] && [ -z "$ERR" ]; then
+    ok
+  else
+    bad "$1" "exit $RC stdout=[$OUT] stderr=[$ERR] (want silent exit 0)"
+  fi
 }
 
 expect_absent() { # name phase type json pattern

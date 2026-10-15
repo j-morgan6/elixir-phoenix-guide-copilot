@@ -1,5 +1,14 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- GitHub Actions CI: the hook suite runs against `elixir-hook.sh` on Ubuntu and macOS (`/bin/bash` 3.2) and against `elixir-hook.ps1` with PowerShell 7 on Linux and Windows and with Windows PowerShell 5.1 on Windows; shellcheck on all shell scripts.
+- `.gitattributes` keeps LF line endings so the bash hook works from Windows checkouts.
+
+### Fixed
+- Test harness converts paths to `C:/…` form under Git Bash, so the PowerShell suite runs on Windows.
+
 ## [2.5.0] - 2026-10-15
 
 Synced with elixir-phoenix-guide 2.5.0: every instruction re-verified against Elixir 1.20, Phoenix 1.8.15, LiveView 1.2.12, Ecto 3.14 and Oban 2.24 (scoped context calls, security fixes, Phoenix 1.8 `phx.gen.auth` accuracy, forms and async in LiveView). See the upstream CHANGELOG for the content changes.

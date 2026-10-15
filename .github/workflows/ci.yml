@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unix:
+    name: Hooks (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS runs the bash hook under /bin/bash 3.2; Ubuntu covers GNU
+        # userland, bash 5 and PowerShell 7 on Linux.
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: command -v jq || brew install jq
+
+      - name: shellcheck
+        if: runner.os == 'Linux'
+        run: shellcheck hooks/*.sh scripts/*.sh scripts/lib/*.sh tests/run_tests.sh
+
+      - name: Bash hook suite
+        run: /bin/bash tests/run_tests.sh sh
+
+      - name: PowerShell hook suite (pwsh)
+        if: runner.os == 'Linux'
+        run: PWSH=pwsh bash tests/run_tests.sh ps1
+
+  windows:
+    name: PowerShell hook (Windows, ${{ matrix.powershell }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # pwsh = PowerShell 7; powershell = Windows PowerShell 5.1, which
+        # Copilot uses on machines without PowerShell 7.
+        powershell: [pwsh, powershell]
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Ensure jq
+        run: command -v jq || choco install jq -y
+
+      - name: PowerShell hook suite
+        env:
+          PWSH: ${{ matrix.powershell }}
+        run: |
+          "$PWSH" -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+          bash tests/run_tests.sh ps1
