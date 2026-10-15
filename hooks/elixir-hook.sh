@@ -41,7 +41,7 @@ CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty | strings' 2>/dev/null)
 if [ -z "$CWD" ] || [ ! -d "$CWD" ]; then CWD="$PWD"; fi
 
 TMPD=""
-# shellcheck disable=SC2329 # invoked by the EXIT trap
+# shellcheck disable=SC2317,SC2329 # invoked by the EXIT trap (older/newer shellcheck codes)
 cleanup() { [ -n "$TMPD" ] && rm -rf "$TMPD"; }
 trap cleanup EXIT
 
