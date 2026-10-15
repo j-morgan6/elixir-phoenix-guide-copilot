@@ -1,6 +1,6 @@
 # Elixir Phoenix Guide — GitHub Copilot Edition
 
-A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 26 hooks that automatically enforce code quality and security rules on every file write, agent docs for deep-dive assistance, and 3 analysis scripts that detect complexity, unused code, and project configuration.
+A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 17 hook checks that block destructive commands and catch security bugs and removed APIs as Copilot writes code, agent docs for deep-dive assistance, and analysis scripts for duplication, branch complexity and project detection.
 
 ## Installation
 
@@ -52,9 +52,11 @@ your-project/
 │   └── elixir-hook.ps1                  # Hook script (PowerShell)
 ├── scripts/
 │   ├── code_quality.exs                 # Elixir static analysis
-│   ├── detect_project.sh                # Project capability detection
-│   └── run_analysis.sh                  # Full analysis suite
-└── AGENTS.md                            # Agent guidance for Ecto, LiveView, structure, testing
+│   ├── detect_project.sh                # One-line project summary
+│   ├── run_analysis.sh                  # Full analysis suite
+│   └── lib/
+│       └── common.sh                    # Shared shell helpers for the scripts
+└── AGENTS.md                            # Agent reference: Ecto, project structure, LiveView, testing
 ```
 
 ## What's Included
@@ -85,40 +87,85 @@ Each instruction is automatically loaded by Copilot when you edit files matching
 | `deployment-gotchas` | `**/config/**/*.exs,**/rel/**/*,**/Dockerfile` |
 | `telemetry-essentials` | `**/*.ex` |
 
-### 26 Hooks (21 PreToolUse + 5 PostToolUse)
+### Hooks (7 PreToolUse checks + 10 PostToolUse checks)
 
-Hooks run automatically via `.github/hooks/elixir-guard.json` and enforce rules on every tool call.
+Hooks run automatically via `.github/hooks/elixir-guard.json`. `hooks/elixir-hook.sh` (macOS/Linux, needs `jq`) and `hooks/elixir-hook.ps1` (Windows PowerShell 5.1 / PowerShell 7, no extra tools) behave identically.
 
-| Category | What Gets Blocked | What Gets Warned |
-|----------|-------------------|------------------|
-| **Dangerous commands** | `mix ecto.reset`, force push, `MIX_ENV=prod` | -- |
-| **Security** | `String.to_atom/1`, SQL injection in `fragment`, open redirect, raw SQL with interpolation | `raw/1` (XSS), sensitive data in Logger, timing-unsafe token comparison |
-| **Deprecated APIs** | `.flash_group`, `form_for`, `live_redirect`/`live_patch`, `@current_user` on Phoenix 1.8+ scope projects | -- |
-| **Upload / config** | Hardcoded file paths, hardcoded file size limits | `auto_upload: true` without handle_progress |
-| **OTP / LiveView** | Missing `@impl true` before callbacks, `static_paths` mismatch | Repo called directly in LiveView, missing preload |
-| **Code style** | -- | Nested if/else, chained Enum.map/filter, string concat in loops |
-| **Migrations** | -- | Missing FK index, missing on_delete, unsafe column removal, NOT NULL without default |
-| **Post-write reminders** | -- | Skill invocation reminder, mix.exs security audit, code quality analysis, `with` missing else, context boundary violations |
+| When | Check | Result |
+|------|-------|--------|
+| Before a shell command | `mix ecto.reset` / `mix ecto.drop`, unless `MIX_ENV=test` | **deny** |
+| | `git push --force`, `-f`, combined flags such as `-uf`, `+refspec` (allows `--force-with-lease`, `--force-if-includes`) | **deny** |
+| Before a file write | SQL built by interpolation in `Repo.query`/`SQL.query` (string or heredoc; `#{@attr}` allowed) | **deny** |
+| | Interpolation inside `fragment()` | **deny** |
+| | `redirect(external: params…)` (open redirect) | **deny** |
+| | `form_for` (removed in phoenix_html 4) | **deny** |
+| | `live_redirect`, `live_patch`, `push_redirect` (deprecated) | **deny** |
+| After a file write | `String.to_atom/1` | review note |
+| | `raw/1`, `Phoenix.HTML.raw/1` | review note |
+| | Logger message interpolating a sensitive name (`#{…password…}`, token, secret, api_key, private_key, credential, authorization) | review note |
+| | `IO.inspect` / `dbg` in `.ex` files (not in `mix/tasks/`) | review note |
+| | `==` on token/secret/api_key/signature (use `Plug.Crypto.secure_compare/2`) | review note |
+| | Callback (`mount`, `handle_*`, `terminate`) without `@impl true` on its first clause | review note |
+| | Migration `references()` column with no index on that table in the same migration | review note |
+| | Migration `references()` without `on_delete:` | review note |
+| | `@current_user` in a project that uses Phoenix 1.8 scopes (a `Scope` module, or `current_scope` in `user_auth.ex`) | review note |
+| | `Repo` called directly in a LiveView module (`*_live.ex`, `live/`) | review note |
+
+**deny**: the tool call is refused with `{"permissionDecision":"deny","permissionDecisionReason":"…"}` and the reason is shown to Copilot. **review note**: returned as `additionalContext` after the write; Copilot sees it and decides, nothing is blocked. (Copilot accepts `additionalContext` only from postToolUse hooks, which is why the heuristic checks run after the write.)
+
+How the file checks decide what to report:
+
+- **Only the text this tool call writes is judged**, so code Copilot didn't touch is never re-flagged. Before a write, the edit is applied to a copy of the file and only the replaced text counts (a whole-file write counts lines that weren't already in the file). After a write, the reported lines are where the new text now sits; for a whole-file write, lines added since the git index (the whole file when it is new or untracked).
+- **Findings use the whole file as context**: a later clause of a callback whose first clause has `@impl true` is fine, and a migration index further down the file counts for its table.
+- `#` comments, `@moduledoc`/`@doc`/`@typedoc` text and HEEx comments are ignored.
+- Skipped: test files (`*_test.exs`, `test/`), `deps/`, `_build/`, `node_modules/`, `.elixir_ls/`.
+
+The command guard:
+
+- Runs only in Elixir projects (a `mix.exs` in the working directory or a parent; umbrella roots count).
+- Splits the command on `;`, `&&`, `||`, `|`, `&`, newlines, subshells and `$(…)` and checks each part's command words. Quoted text, `#` comments and heredoc bodies are ignored, so `git commit -m "… mix ecto.reset …"` and `grep "mix ecto.reset" docs/` pass. Leading `VAR=value`, `env`, `git -C dir` and `git -c key=value` are understood; `mix do ecto.drop + ecto.create` is checked task by task.
+- `MIX_ENV=test` counts when it prefixes the command, was exported earlier in the same command line, or is set in Copilot's environment.
+- **Opt-out**: set `EPG_ALLOW` to a comma-separated list of `force_push`, `ecto_reset`, `ecto_drop` — as a command prefix (`EPG_ALLOW=force_push git push --force origin release`), or in the environment Copilot runs with (or the hook entry's `env` in `elixir-guard.json`) for every session. The deny message tells Copilot it may use the prefix only when you asked for the destructive command explicitly.
+- Known limits: commands inside `bash -c "…"`/`eval` strings, aliases, shell functions and `$(…)` inside double quotes are not inspected.
+
+The hooks fail open: bad input, a missing `jq` (bash script) or an internal error lets the tool call through rather than blocking it. Nothing runs `mix` or compiles code.
 
 ### Agent Docs (AGENTS.md)
 
-Consolidated guidance covering:
-- **Ecto Conventions** -- schema design, query optimization, database conventions
-- **LiveView Checklist** -- implementation patterns, component design, common pitfalls
-- **Project Structure** -- directory layout, context organization, file naming
-- **Testing Guide** -- ExUnit patterns, DataCase/ConnCase, test organization
+Reference material Copilot can read on demand, generated from the canonical plugin's skill reference files:
+- **Ecto Reference** -- field types, associations, validators and constraints, query syntax, Repo return shapes, migration operations, soft delete
+- **Phoenix Project Structure** -- directory layout, context boundaries, file organization, configuration, static files and uploads
+- **LiveView Checklist** -- review checklist for LiveView modules and templates
+- **LiveView JS Interop** -- hooks, colocated hooks/JS/CSS, `push_event`, replies, `JS` commands
+- **Testing Reference** -- fixtures, context/schema/LiveView/upload tests, async tests and the SQL sandbox
 
-### 3 Analysis Scripts
+### Analysis Scripts
+
+Run these yourself (or ask Copilot to); the hooks don't call them.
 
 | Script | Purpose |
 |--------|---------|
-| `code_quality.exs` | Elixir static analysis -- complexity, duplication, and unused function detection |
-| `detect_project.sh` | Detects project capabilities (LiveView, Oban, Scope, etc.) and writes a cache file for context-aware hooks |
-| `run_analysis.sh` | Runs the full suite of analysis scripts against the current project |
+| `code_quality.exs` | On-demand analysis: duplicated function bodies and branch complexity (`elixir scripts/code_quality.exs scan lib/`). For unused functions use `mix compile --warnings-as-errors` and `mix xref` |
+| `detect_project.sh` | Prints a one-line project summary: locked Phoenix/LiveView versions, whether the app uses Phoenix 1.8 scopes, Ecto adapter, Oban, umbrella apps |
+| `run_analysis.sh` | Runs `code_quality.exs` over `lib/` (or every `apps/*/lib` in an umbrella) |
+| `lib/common.sh` | Shell helpers shared by the scripts above |
 
 ## Requirements
 
-Works with any Elixir/Phoenix project. Elixir is optional -- it is only required for the `code_quality.exs` script (code quality analysis). All other hooks and instructions function without a local Elixir installation.
+Works with any Elixir/Phoenix project.
+
+- **`jq`** for `hooks/elixir-hook.sh` (macOS/Linux): `brew install jq`, `apt-get install jq`. Without it the bash hooks do nothing. The PowerShell hook needs nothing extra.
+- `git` (optional) lets the post-write check limit whole-file writes to the lines that changed.
+- Elixir only for the on-demand `code_quality.exs` analysis; hooks and instructions don't need it.
+
+## Testing the hooks
+
+```bash
+/bin/bash tests/run_tests.sh                       # bash hook (macOS bash 3.2 compatible)
+PWSH=/path/to/pwsh /bin/bash tests/run_tests.sh ps1  # same cases against the PowerShell hook
+```
+
+The suite feeds Copilot-shaped hook JSON to the scripts and checks every hook check in both directions, every command-guard case, changed-lines behaviour for edits and whole-file writes, and the accepted payload shapes.
 
 ## Claude Code Version
 

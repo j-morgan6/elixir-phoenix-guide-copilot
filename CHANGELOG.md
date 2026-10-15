@@ -1,5 +1,41 @@
 # Changelog
 
+## [2.5.0] - 2026-10-15
+
+Synced with elixir-phoenix-guide 2.5.0: every instruction re-verified against Elixir 1.20, Phoenix 1.8.15, LiveView 1.2.12, Ecto 3.14 and Oban 2.24 (scoped context calls, security fixes, Phoenix 1.8 `phx.gen.auth` accuracy, forms and async in LiveView). See the upstream CHANGELOG for the content changes.
+
+### Fixed
+- **Advisories now reach Copilot.** `preToolUse` only honours `permissionDecision`/`permissionDecisionReason`/`modifiedArgs`, so advisories emitted there were dropped. `pre edit` now only blocks; review notes come from `post edit` as `additionalContext`.
+- **Hooks fail open.** A crashing `preToolUse` hook denies the tool call; both scripts now exit 0 on bad input, a missing `jq` or an internal error (`elixir-hook.ps1` previously ran with `$ErrorActionPreference = "Stop"` and no catch).
+- **`elixir-hook.ps1` deny paths** emit `permissionDecision` JSON (via `ConvertTo-Json -Compress`) instead of `Write-Error`, and the script is now behaviourally identical to `elixir-hook.sh` (closes the 2.4.0 known gap).
+- Command guard splits commands into segments and ignores quoted text, comments and heredocs: `MIX_ENV=test mix ecto.reset` and commit messages mentioning it are allowed; `mix ecto.drop`, `+refspec`, `-uf` and `git -C dir push --force` are blocked; it only runs in Elixir projects.
+- Open-redirect check matches `redirect(external: params…)` instead of the safe `to:` form.
+- SQL interpolation in `Repo.query`/`SQL.query` (including heredocs) is caught directly.
+- Comments, `@doc`/`@moduledoc` text and HEEx comments are ignored; `deps/`, `_build/`, `node_modules/` and `.elixir_ls/` are skipped.
+- `form_for` has a word boundary; Logger is only flagged when it interpolates a sensitive name; `IO.inspect`/`dbg` are allowed in `mix/tasks/`; `@impl` is only required on a callback's first clause; migration index checks are per table.
+
+### Added
+- `EPG_ALLOW=force_push,ecto_reset,ecto_drop` opt-out (command prefix, earlier `export` in the same command line, or the hook environment).
+- `push_redirect` flagged as deprecated.
+- Hooks accept `toolArgs` as an object or JSON string, Copilot `edit`/`create` arguments, VS Code-style `filePath`/`newString`, and MultiEdit-style `edits[]`.
+- `tests/run_tests.sh [sh|ps1]` hook test suite (190 bash / 189 PowerShell cases).
+- `AGENTS.md` is regenerated from the upstream skills' reference files: Ecto Reference, Phoenix Project Structure, LiveView Checklist, LiveView JS Interop, Testing Reference.
+- `scripts/lib/common.sh` (shared helpers for `detect_project.sh` and `run_analysis.sh`).
+
+### Changed
+- Block-tier checks (SQL/fragment interpolation, external redirect from params, `form_for`, `live_redirect`/`live_patch`/`push_redirect`) deny before the write; review-tier checks arrive after the write.
+- Only the code being written is judged (with whole-file context), so existing code is never re-flagged.
+- `@current_user` is a review note, and only when the project actually uses scopes.
+- `scripts/code_quality.exs`: unused-function detector removed (use `mix compile --warnings-as-errors` and `mix xref`), "ABC" renamed to branch complexity, duplication compared across the whole tree.
+
+### Removed
+- Checks that were wrong or noisy: `MIX_ENV=prod` block (blocked release builds), `<.flash_group` block (the 1.8 generator uses it), `static_paths` mismatch, hard-coded upload path and file-size blocks, nested if/else, Enum chains, string concatenation in Enum, `auto_upload` without progress, `IO.puts`, missing-preload guess, `with` without `else`, column-removal and NOT NULL migration warnings.
+- The per-write "did you invoke the skill" reminder and the per-write `code_quality.exs` run (its output was discarded).
+
+### Known gaps
+- `elixir-hook.ps1` is tested with PowerShell 7 on macOS, not Windows PowerShell 5.1.
+- `scripts/detect_project.sh` (run manually) writes its cache under `~/.claude/elixir-phoenix-guide/` unless `CLAUDE_PLUGIN_DATA` is set; the hooks don't use it.
+
 ## [2.4.0] - 2026-07-03
 
 ### Fixed

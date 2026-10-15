@@ -20,8 +20,8 @@ When working with Elixir (.ex, .exs) or HEEx (.html.heex) files, context-specifi
 
 ## Hooks
 
-PreToolUse and PostToolUse hooks enforce these rules automatically:
-- **Blocking hooks** prevent dangerous operations (ecto.reset, force push, SQL injection, atom exhaustion)
-- **Warning hooks** flag code smells (nested if/else, inefficient Enum chains, missing preloads)
+PreToolUse and PostToolUse hooks enforce these rules automatically, judging only the code you are writing:
+- **Blocking hooks** deny destructive commands (`mix ecto.reset`/`mix ecto.drop` outside `MIX_ENV=test`, force pushes) and writes that add near-certain bugs (SQL built by interpolation, interpolation in `fragment`, `redirect(external: params…)`, removed `form_for`, deprecated `live_redirect`/`live_patch`/`push_redirect`). Fix the code and write it again. If the user explicitly asked for a blocked command, re-run it prefixed with the `EPG_ALLOW=…` value the message names.
+- **Review notes** after a write flag likely problems (`String.to_atom/1`, `raw/1`, secrets in Logger messages, leftover `IO.inspect`/`dbg`, `==` on tokens, missing `@impl true`, unindexed or `on_delete`-less foreign keys, `@current_user` in scope-based apps, `Repo` calls in LiveViews). Fix them or confirm they are intentional.
 
-See AGENTS.md for specialized agent guidance on Ecto, LiveView, project structure, and testing.
+See AGENTS.md for reference material on Ecto, project structure, LiveView (checklist and JS interop), and testing.

@@ -5,5 +5,3 @@
 .vscode/
 .idea/
 
-# Project detection cache (generated per-project at session start)
-.elixir-phoenix-guide-project.json
