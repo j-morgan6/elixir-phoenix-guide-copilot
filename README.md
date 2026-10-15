@@ -1,5 +1,7 @@
 # Elixir Phoenix Guide — GitHub Copilot Edition
 
+[![CI](https://github.com/j-morgan6/elixir-phoenix-guide-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/j-morgan6/elixir-phoenix-guide-copilot/actions/workflows/ci.yml)
+
 A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 17 hook checks that block destructive commands and catch security bugs and removed APIs as Copilot writes code, agent docs for deep-dive assistance, and analysis scripts for duplication, branch complexity and project detection.
 
 ## Installation

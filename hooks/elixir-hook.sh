@@ -38,7 +38,7 @@ ARGS=$(printf '%s' "$INPUT" | jq -c '
   | if type == "object" then . else {} end' 2>/dev/null) || exit 0
 [ -n "$ARGS" ] || exit 0
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty | strings' 2>/dev/null)
-[ -n "$CWD" ] && [ -d "$CWD" ] || CWD="$PWD"
+if [ -z "$CWD" ] || [ ! -d "$CWD" ]; then CWD="$PWD"; fi
 
 TMPD=""
 # shellcheck disable=SC2329 # invoked by the EXIT trap
