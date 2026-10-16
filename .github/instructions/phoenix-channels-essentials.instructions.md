@@ -1,5 +1,5 @@
 ---
-applyTo: "**/*.ex"
+applyTo: "**/channels/**/*.ex,**/*_socket.ex,**/*_channel.ex,**/presence.ex"
 ---
 
 # Phoenix Channels Essentials

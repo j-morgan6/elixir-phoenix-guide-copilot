@@ -1,5 +1,5 @@
 ---
-applyTo: "**/*.ex"
+applyTo: "**/live/**/*.ex,**/lib/*/*.ex"
 ---
 
 # Phoenix PubSub Patterns
@@ -164,6 +164,8 @@ end
 | `"user:#{scope.user.id}:posts"` | that user (generator default) |
 | `"org:#{scope.org.id}:posts"` | members of the org, if your scope carries one |
 | `"post:#{post.id}:comments"` | only after `get_post!(scope, id)` succeeded for this user |
+
+The topic prefix is the scope's config entry name (`user`, `org`); see the `phoenix-scopes-and-generators` skill to add an org entry.
 
 Topic names are not secrets, and `Phoenix.PubSub.subscribe/2` has no access control. The only guard is that your code decides which topics a process subscribes to, after authorizing.
 

@@ -128,7 +128,7 @@ Repo.exists?(from i in Image, where: i.folder_id == ^folder_id)
 Repo.all_by(Image, folder_id: folder_id, user_id: user_id)
 ```
 
-Preloading a custom query with `limit` limits across **all** parents, not per parent. For "latest N per parent" use a lateral join or a window function.
+Preloading a custom query with `limit` limits across **all** parents, not per parent. For "latest N per parent" use a lateral join or a window function. A worked window-function version is in the `ecto-queries-performance` skill.
 
 ### Repo Return Shapes
 
@@ -165,7 +165,9 @@ create constraint(:images, :byte_size_must_be_positive, check: "byte_size > 0")
 execute "CREATE EXTENSION IF NOT EXISTS citext", ""
 ```
 
-Not reversible in `change/0`: `remove/1` (no type), `modify/3` without `from:`, `execute/1`, `remove_if_exists`, `drop table(...)`, `drop constraint(...)`. Use the forms above or write `up/0` and `down/0`.
+Not reversible in `change/0`: `remove/1` (no type), `modify/3` without `from:`, `execute/1`, `remove_if_exists`, `drop table(...)`, `drop constraint(...)`, and `flush()` (raises on rollback). Use the forms above or write `up/0` and `down/0`.
+
+Reversible isn't the same as safe on a table with live traffic: renames, drops, `NOT NULL` and non-concurrent indexes there are covered in the `ecto-migrations-safety` skill.
 
 Generate with `mix ecto.gen.migration create_images`; never edit a migration that has already run in another environment — add a new one.
 
@@ -295,7 +297,7 @@ my_app/
 └── mix.exs                          # Deps and aliases (setup, assets.build, assets.deploy)
 ```
 
-There is no `tailwind.config.js` in Phoenix 1.8: Tailwind v4 is configured in `assets/css/app.css`. Both tailwind and esbuild run as Mix deps (no Node required) via `config :tailwind` / `config :esbuild` and the dev watchers.
+There is no `tailwind.config.js` in Phoenix 1.8: Tailwind v4 is configured in `assets/css/app.css`. Both tailwind and esbuild run as Mix deps (no Node required) via `config :tailwind` / `config :esbuild` and the dev watchers. See the `phoenix-tailwind-daisyui` skill for `@source`, daisyUI themes and dynamic class names.
 
 ### Context Boundaries
 
@@ -1285,25 +1287,25 @@ defmodule MyApp.WeatherTest do
       Req.Test.json(conn, %{"celsius" => 21.5})
     end)
 
-    assert {:ok, 21.5} = MyApp.Weather.celsius("Lisbon")
+    assert {:ok, 21.5} = MyApp.Weather.current("Lisbon")
   end
 
   test "maps a 503 to an error" do
     Req.Test.stub(MyApp.Weather, &Plug.Conn.send_resp(&1, 503, "down"))
-    assert {:error, {:http, 503}} = MyApp.Weather.celsius("Lisbon")
+    assert {:error, {:unexpected_response, 503}} = MyApp.Weather.current("Lisbon")
   end
 
   test "a transport error, then a good reply" do
     Req.Test.expect(MyApp.Weather, &Req.Test.transport_error(&1, :econnrefused))
     Req.Test.expect(MyApp.Weather, &Req.Test.json(&1, %{"celsius" => 3.0}))
 
-    assert {:error, %Req.TransportError{}} = MyApp.Weather.celsius("Oslo")
-    assert {:ok, 3.0} = MyApp.Weather.celsius("Oslo")
+    assert {:error, %Req.TransportError{}} = MyApp.Weather.current("Oslo")
+    assert {:ok, 3.0} = MyApp.Weather.current("Oslo")
   end
 end
 ```
 
-`Req.Test.expect/3` registrations are consumed in order. For a request made from a GenServer, `Req.Test.allow(MyApp.Weather, self(), pid)`.
+`Req.Test.expect/3` registrations are consumed in order. Processes the test starts (`Task`, `start_supervised!`) find its stubs through `$callers`/`$ancestors`; for a process the application started, call `Req.Test.allow(MyApp.Weather, self(), pid)`.
 
 ---
 
@@ -1366,3 +1368,406 @@ test/
 │       └── test.png
 └── test_helper.exs                 # Mox.defmock calls go here
 ```
+
+## Ecto Migrations Reference
+
+
+Extra detail for the `ecto-migrations-safety` skill. Verified against ecto_sql 3.14 and PostgreSQL 16.
+
+### lock_timeout for a concurrent index
+
+`CREATE INDEX CONCURRENTLY` can't run in a transaction, so `after_begin/0` never runs and `SET LOCAL` has nothing to attach to. Without a transaction, each migration command checks out whichever pooled connection is free, so a session-level `SET` reaches only some of them. Pin one connection for the whole migration:
+
+```elixir
+defmodule MyApp.Repo.Migrations.AddPostsSlugIndex do
+  use Ecto.Migration
+  @disable_ddl_transaction true
+  @disable_migration_lock true
+
+  def up do
+    with_lock_timeout(fn -> create index(:posts, [:slug], concurrently: true) end)
+  end
+
+  def down do
+    with_lock_timeout(fn -> drop index(:posts, [:slug], concurrently: true) end)
+  end
+
+  # Pin one connection so the SET applies to the DDL that follows.
+  defp with_lock_timeout(fun) do
+    repo().checkout(fn ->
+      repo().query!("SET lock_timeout TO '5s'")
+
+      try do
+        fun.()
+        flush()
+      after
+        repo().query!("RESET lock_timeout")
+      end
+    end)
+  end
+end
+```
+
+- This needs `up/0`/`down/0`: `flush()` inside `change/0` raises on rollback.
+- Tested: while another session held `SHARE UPDATE EXCLUSIVE` on `posts`, the build failed after the timeout with `55P03` and left no index behind.
+- A queued concurrent build doesn't block reads or writes, because `SHARE UPDATE EXCLUSIVE` doesn't conflict with them. So this is optional. Use it when a stalled deploy is worse than a failed one.
+
+### Applying lock_timeout to every migration
+
+This is the pattern from the `Ecto.Migration` docs:
+
+```elixir
+defmodule MyApp.Migration do
+  defmacro __using__(_opts) do
+    quote do
+      use Ecto.Migration
+
+      def after_begin do
+        repo().query!("SET LOCAL lock_timeout TO '5s'")
+      end
+    end
+  end
+end
+```
+
+Put it in `lib/my_app/migration.ex` and write `use MyApp.Migration` in place of `use Ecto.Migration`. `mix ecto.gen.migration` still generates `use Ecto.Migration`, so change it in each new file. Migrations with `@disable_ddl_transaction` skip `after_begin/0`.
+
+### Migration lock strategies (PostgreSQL adapter)
+
+| `migration_lock` | Behaviour |
+|---|---|
+| `:table_lock` (default) | opens a transaction and runs `LOCK TABLE "schema_migrations" IN SHARE UPDATE EXCLUSIVE MODE` for the run. Concurrent index builds deadlock against it unless the migration sets `@disable_migration_lock true` |
+| `:pg_advisory_lock` | holds `pg_try_advisory_lock(...)` on one connection. Other nodes retry every 5 s (`:migration_advisory_lock_retry_interval_ms`) without limit (`:migration_advisory_lock_max_tries`). Doesn't work behind PgBouncer in transaction or statement pooling mode |
+| `false` | no lock at all |
+
+### Lock levels for common DDL (PostgreSQL docs)
+
+| Statement | Lock | Conflicts with normal traffic |
+|---|---|---|
+| `ADD COLUMN`, `DROP COLUMN`, `ALTER COLUMN TYPE`, `SET NOT NULL`, `RENAME` | `ACCESS EXCLUSIVE` | reads and writes |
+| `ADD CONSTRAINT ... CHECK`, including `NOT VALID` | `ACCESS EXCLUSIVE` | reads and writes, briefly when `NOT VALID` |
+| `ADD FOREIGN KEY` | `SHARE ROW EXCLUSIVE` on both tables | writes |
+| `VALIDATE CONSTRAINT` | `SHARE UPDATE EXCLUSIVE` (foreign keys: plus `ROW SHARE` on the referenced table) | none |
+| `CREATE INDEX` | `SHARE` | writes |
+| `CREATE INDEX CONCURRENTLY` / `DROP INDEX CONCURRENTLY` | `SHARE UPDATE EXCLUSIVE` | none |
+| `DROP INDEX` | `ACCESS EXCLUSIVE` | reads and writes |
+
+Any of these, while it waits, also blocks every later request for a conflicting lock. That's why `lock_timeout` matters even for instant DDL.
+
+### Checking for rewrites yourself
+
+```sql
+SELECT pg_relation_filenode('posts');   -- changes after a rewrite
+SET client_min_messages TO debug1;      -- in psql, before the ALTER
+-- "verifying table "posts""  => full scan
+-- "existing constraints on column ... are sufficient to prove that it does not contain nulls"  => scan skipped
+```
+
+### Pre-merge checklist
+
+- [ ] Each migration that alters a populated table sets `lock_timeout`
+- [ ] Indexes on existing tables use `concurrently: true` with both attributes, one per migration
+- [ ] No volatile defaults and no rewriting type changes on large tables
+- [ ] New constraints and foreign keys use `validate: false`, validated in a later migration
+- [ ] No rename or drop of anything the currently deployed code reads
+- [ ] Backfills are separate, schemaless and batched
+- [ ] `mix ecto.rollback` works for the new migrations (or `down/0` is deliberately a no-op)
+- [ ] `mix ecto.migrate --log-migrations-sql` output reviewed
+
+## Ecto Queries Reference
+
+
+> Verified against Elixir 1.20, Ecto 3.14, ecto_sql 3.14 (PostgreSQL 16) — October 2026
+
+Supporting material for the `ecto-queries-performance` skill.
+
+### Counting queries in tests
+
+This helper pins an N+1 fix by counting the `[:my_app, :repo, :query]` events that the code under test emits. Telemetry handlers are global and run in the process that issued the query, so the handler only counts queries from the test process and from processes that list it in `$callers`. That covers parallel preloads, `Task`s and LiveView async work, and it keeps `async: true` tests from counting each other's queries.
+
+```elixir
+# test/support/query_counter.ex
+defmodule MyApp.QueryCounter do
+  @event [:my_app, :repo, :query]
+
+  @doc "Runs fun and returns {query_count, result}."
+  def count_queries(fun) do
+    ref = make_ref()
+    handler_id = {__MODULE__, ref}
+    :telemetry.attach(handler_id, @event, &__MODULE__.handle_event/4, {self(), ref})
+
+    try do
+      result = fun.()
+      {collect(ref, 0), result}
+    after
+      :telemetry.detach(handler_id)
+    end
+  end
+
+  @doc false
+  def handle_event(_event, _measurements, _metadata, {pid, ref}) do
+    if self() == pid or pid in Process.get(:"$callers", []), do: send(pid, {ref, :query})
+  end
+
+  defp collect(ref, count) do
+    receive do
+      {^ref, :query} -> collect(ref, count + 1)
+    after
+      0 -> count
+    end
+  end
+end
+```
+
+```elixir
+test "list_posts_with_comments/1 doesn't query per post", %{scope: scope} do
+  for _ <- 1..5, do: post_fixture(scope)
+
+  {count, posts} = MyApp.QueryCounter.count_queries(fn -> Blog.list_posts_with_comments(scope) end)
+
+  assert length(posts) == 5
+  # posts + comments, whatever the number of posts
+  assert count == 2
+end
+```
+
+Verified behavior: `Repo.all(from p in Post, preload: [:comments, :user])` counts 3, mapping `Repo.preload/2` over 12 posts counts 13, and a query run inside `Task.async` is counted. The handler is a remote capture (`&__MODULE__.handle_event/4`), so `:telemetry` doesn't log its "local function" performance warning.
+
+### Schema-per-tenant prefixes
+
+Here each tenant gets a Postgres schema (`tenant_42.posts`), and the prefix is chosen at runtime from the scope:
+
+```elixir
+defp prefix(%Scope{} = scope), do: "tenant_#{scope.org.id}"
+
+def list_posts(%Scope{} = scope) do
+  Post
+  |> order_by(desc: :inserted_at)
+  |> Repo.all(prefix: prefix(scope))
+end
+
+def create_post(%Scope{} = scope, attrs) do
+  %Post{}
+  |> Post.changeset(attrs, scope)
+  |> Repo.insert(prefix: prefix(scope))
+end
+```
+
+- `Repo.all(query, prefix: p)` applies `p` to every `from` and `join` that doesn't already have a prefix. `put_query_prefix(query, p)` sets the same thing on the query itself, for example `Post |> put_query_prefix("tenant_1") |> preload(:comments)`, which generates `FROM "tenant_1"."posts"`.
+- **Loaded structs remember their prefix** in `__meta__` (`Ecto.get_meta(post, :prefix)`). `Repo.update/2`, `Repo.delete/2` and `Repo.preload/2` on that struct go to the same schema without passing `prefix:` again. To build a new struct for a tenant, use `Ecto.put_meta(%Post{}, prefix: p)` or pass `prefix:` to `insert`.
+- `@schema_prefix "analytics"` is a **compile-time** default for a schema that always lives in one fixed Postgres schema. It can't express per-tenant prefixes.
+- Run tenant migrations with `mix ecto.migrate --prefix tenant_42`, or `Ecto.Migrator.run(Repo, :up, all: true, prefix: "tenant_42")` when you create a tenant at runtime. Every tenant schema has its own `schema_migrations` table.
+- Build the prefix only from a trusted id (the scope's org id), never from request input. A prefix is interpolated into SQL as an identifier, not sent as a bind parameter.
+- Hundreds of schemas multiply migration time and catalog size. Above a few hundred tenants, row-level `org_id` with the `prepare_query/3` guard from the skill usually scales better.
+
+### `prepare_query/3` guard
+
+This guard is for row-level tenancy. Every tenant table has an `org_id` column, and contexts pass `org_id: scope.org.id` to Repo calls. `tenant_schema?/1` runs first, so queries on non-tenant schemas (users, or Oban's tables) pass through untouched.
+
+```elixir
+defmodule MyApp.Repo do
+  use Ecto.Repo, otp_app: :my_app, adapter: Ecto.Adapters.Postgres
+
+  require Ecto.Query
+
+  @impl true
+  def prepare_query(_operation, query, opts) do
+    cond do
+      opts[:skip_org_id] || opts[:schema_migration] || not tenant_schema?(query) ->
+        {query, opts}
+
+      org_id = opts[:org_id] ->
+        {Ecto.Query.where(query, org_id: ^org_id), opts}
+
+      true ->
+        raise ArgumentError, "expected :org_id or skip_org_id: true for #{inspect(query.from.source)}"
+    end
+  end
+
+  defp tenant_schema?(%{from: %{source: {_table, schema}}}) when is_atom(schema) and not is_nil(schema),
+    do: :org_id in schema.__schema__(:fields)
+
+  defp tenant_schema?(_query), do: false
+end
+
+# In the context: Repo.all(query, org_id: scope.org.id)
+```
+
+#### What it covers
+
+This was checked against a test repo running the code above, with only the tenant column renamed:
+
+| Call | Guarded? |
+|---|---|
+| `Repo.all/one/get/get_by/aggregate/exists?/stream`, `update_all`, `delete_all` on a tenant schema | Yes: raises without `org_id:`, filters with it |
+| Preloads of tenant associations | Yes: the options propagate (`ecto_query: :preload`) |
+| Preloads of non-tenant schemas (e.g. `:user`) | Skipped by `tenant_schema?/1`, so they work |
+| Joined tenant tables | **No**: only the `from` source is filtered |
+| `from` a subquery or a bare table string (`from p in "posts"`) | **No**: there is no schema to inspect |
+| `Repo.insert/update/delete` of a struct | **No**: the callback isn't invoked; check ownership against the scope |
+
+### Reading EXPLAIN output
+
+- `Seq Scan` on a large table, combined with a selective `WHERE`, usually means a missing index, or an index the predicate can't use (different expression, missing partial-index predicate, leading column not in the `WHERE`).
+- `Sort` above an `Index Scan` means the index serves the filter but not the `ORDER BY`. Add the sort column after the equality columns.
+- With `analyze: true`, a large gap between estimated `rows=` and actual rows points to stale statistics: run `ANALYZE posts`.
+- `buffers: true` shows `shared hit` (cache) versus `read` (disk). Queries that read many pages are the ones to fix first.
+- `format: :map` returns the plan as decoded JSON, which is handy for asserting on it in a script.
+
+## HTTP Clients Reference
+
+
+Supporting material for the `http-clients-req` skill. Every module here was compiled and tested against Req 0.7.5, Finch 0.24, fuse 2.5 and Mox 1.3.
+
+### Telemetry plugin
+
+Finch's events fire once per attempt and don't know which API they belong to. This plugin emits one event per logical call, after retries, tagged with your API name.
+
+```elixir
+defmodule MyApp.HTTPTelemetry do
+  @moduledoc """
+  Emits `[:my_app, :http, :request, :stop]` once per logical request (after retries).
+  Measurements: `%{duration: native_time}`; metadata: `%{api:, method:, status:, error:}`.
+  """
+
+  def attach(%Req.Request{} = req, opts) do
+    req
+    |> Req.Request.register_options([:api])
+    |> Req.Request.merge_options(opts)
+    |> Req.Request.prepend_request_steps(telemetry_start: &start/1)
+    |> Req.Request.append_response_steps(telemetry_stop: &stop/1)
+    |> Req.Request.append_error_steps(telemetry_stop: &stop/1)
+  end
+
+  # Retries re-run request steps; keep the first attempt's start time
+  defp start(req) do
+    Req.Request.update_private(req, :telemetry_start, System.monotonic_time(), & &1)
+  end
+
+  defp stop({req, response_or_exception}) do
+    duration = System.monotonic_time() - Req.Request.get_private(req, :telemetry_start)
+
+    metadata =
+      case response_or_exception do
+        %Req.Response{status: status} -> %{status: status, error: nil}
+        exception -> %{status: nil, error: exception.__struct__}
+      end
+
+    :telemetry.execute(
+      [:my_app, :http, :request, :stop],
+      %{duration: duration},
+      Map.merge(metadata, %{api: req.options[:api], method: req.method})
+    )
+
+    {req, response_or_exception}
+  end
+end
+
+# In the client's new/0:
+#   Req.new(...) |> MyApp.HTTPTelemetry.attach(api: :payments)
+```
+
+How it works:
+
+- `register_options/2` is required. Without it, `api:` fails Req's option validation with `ArgumentError`.
+- The `retry` response step runs first. When it retries, it runs the whole pipeline again, request steps included, and halts the outer one. So the steps appended here run once, on the final result. The request step runs on every attempt, which is why it keeps the first timestamp.
+- A request step that halts (like the circuit breaker below) skips the response and error steps, so a call rejected by an open circuit emits no event.
+- Report it with `Telemetry.Metrics.summary("my_app.http.request.stop.duration", unit: {:native, :millisecond}, tags: [:api, :status])`. The `telemetry-essentials` skill covers wiring metrics.
+
+### Circuit breaker with `:fuse`
+
+`{:fuse, "~> 2.5"}` (an Erlang library) tolerates `MaxR` failures in `MaxT` ms, then "blows" for the reset period. While it's blown, calls fail at once instead of waiting for timeouts.
+
+```elixir
+defmodule MyApp.CircuitBreaker do
+  @moduledoc "Req plugin backed by :fuse — fail fast while an upstream is down."
+
+  # Blow after 5 failures within 10 s; try again after 30 s
+  def install(name), do: :fuse.install(name, {{:standard, 5, 10_000}, {:reset, 30_000}})
+
+  def attach(%Req.Request{} = req, opts) do
+    req
+    |> Req.Request.register_options([:fuse])
+    |> Req.Request.merge_options(opts)
+    |> Req.Request.prepend_request_steps(fuse_check: &check/1)
+    |> Req.Request.append_response_steps(fuse_melt: &melt_on_5xx/1)
+    |> Req.Request.append_error_steps(fuse_melt: &melt_on_error/1)
+  end
+
+  defp check(req) do
+    case :fuse.ask(req.options[:fuse], :sync) do
+      :ok -> req
+      :blown -> Req.Request.halt(req, RuntimeError.exception("circuit open: #{req.options[:fuse]}"))
+      {:error, :not_found} -> req
+    end
+  end
+
+  defp melt_on_5xx({req, %Req.Response{status: status} = response}) do
+    if status >= 500, do: :fuse.melt(req.options[:fuse])
+    {req, response}
+  end
+
+  defp melt_on_error({req, exception}) do
+    :fuse.melt(req.options[:fuse])
+    {req, exception}
+  end
+end
+```
+
+```elixir
+# lib/my_app/application.ex, before the children start
+:ok = MyApp.CircuitBreaker.install(:payments)
+
+# In the client's new/0
+Req.new(...) |> MyApp.CircuitBreaker.attach(fuse: :payments)
+```
+
+- A blown circuit returns `{:error, %RuntimeError{message: "circuit open: payments"}}` from `Req.request/2`, which lands in the client's `{:error, exception}` clause. Define your own exception module if callers need to match on it.
+- Melting happens once per logical call, after Req's retries, so a call that needed three retries counts as one failure.
+- 4xx responses don't melt the fuse: they are the caller's problem, not the upstream's.
+- Fuses are global (one per name, per node). Tests that make failing calls through a shared fuse should reset it in `setup` (`:fuse.reset(:payments)`) and run with `async: false`, or install a separate fuse just for the test.
+
+### Behaviour and Mox
+
+Use this when callers (LiveViews, contexts, workers) should depend on "a weather source", not on HTTP. Then their tests stub domain results instead of HTTP responses.
+
+```elixir
+defmodule MyApp.WeatherClient do
+  @moduledoc "Boundary for weather lookups; the HTTP implementation is MyApp.Weather."
+
+  @callback current(city :: String.t(), opts :: keyword()) :: {:ok, float()} | {:error, term()}
+
+  def current(city, opts \\ []), do: impl().current(city, opts)
+
+  defp impl, do: Application.get_env(:my_app, :weather_client, MyApp.Weather)
+end
+
+# MyApp.Weather adds `@behaviour MyApp.WeatherClient` and `@impl true` on current/2.
+```
+
+```elixir
+# test/test_helper.exs
+Mox.defmock(MyApp.WeatherMock, for: MyApp.WeatherClient)
+
+# config/test.exs
+config :my_app, :weather_client, MyApp.WeatherMock
+```
+
+```elixir
+defmodule MyApp.WeatherClientTest do
+  use ExUnit.Case, async: true
+  import Mox
+
+  setup :verify_on_exit!
+
+  test "callers use the behaviour; tests swap in the mock" do
+    expect(MyApp.WeatherMock, :current, fn "Lisbon", [] -> {:ok, 21.5} end)
+    assert {:ok, 21.5} = MyApp.WeatherClient.current("Lisbon")
+  end
+end
+```
+
+- Callers go through `MyApp.WeatherClient.current/2`. Test `MyApp.Weather` itself by calling it directly with `Req.Test` stubs, so the HTTP mapping is still covered.
+- Read the implementation with `Application.get_env/3` at call time, not `compile_env`, so tests can swap it.
+- Mox expectations follow the same ownership rules as `Req.Test` (`$callers`, `Mox.allow/3`). See the `testing-essentials` skill.
+- If the only consumer is the context that wraps the client, skip the behaviour: `Req.Test` alone is less code and tests more.

@@ -1,5 +1,5 @@
 ---
-applyTo: "**/*.ex,**/*.exs"
+applyTo: "**/lib/*/*/*.ex"
 ---
 
 # Ecto Changeset Patterns

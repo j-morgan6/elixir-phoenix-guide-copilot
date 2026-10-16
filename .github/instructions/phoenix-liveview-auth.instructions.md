@@ -1,5 +1,5 @@
 ---
-applyTo: "**/live/**/*.ex,**/*_live.ex"
+applyTo: "**/user_auth.ex,**/router.ex,**/live/user_live/**/*.ex"
 ---
 
 # Phoenix LiveView Authentication
