@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/j-morgan6/elixir-phoenix-guide-copilot/actions/workflows/ci.yml/badge.svg)](https://github.com/j-morgan6/elixir-phoenix-guide-copilot/actions/workflows/ci.yml)
 
-A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 19 context-aware instructions covering the full Phoenix stack, 17 hook checks that block destructive commands and catch security bugs and removed APIs as Copilot writes code, agent docs for deep-dive assistance, and analysis scripts for duplication, branch complexity and project detection.
+A GitHub Copilot-native instruction set that brings opinionated, production-ready Elixir and Phoenix guidance directly into your editor. It ships 24 context-aware instructions covering the full Phoenix stack, 17 hook checks that block destructive commands and catch security bugs and removed APIs as Copilot writes code, agent docs for deep-dive assistance, and analysis scripts for duplication, branch complexity and project detection.
 
 ## Installation
 
@@ -28,25 +28,30 @@ your-project/
 ├── .github/
 │   ├── copilot-instructions.md          # Project-wide overview (always loaded)
 │   ├── instructions/
-│   │   ├── elixir-essentials.instructions.md
-│   │   ├── ecto-essentials.instructions.md
+│   │   ├── code-quality.instructions.md
+│   │   ├── deployment-gotchas.instructions.md
 │   │   ├── ecto-changeset-patterns.instructions.md
+│   │   ├── ecto-essentials.instructions.md
+│   │   ├── ecto-migrations-safety.instructions.md
 │   │   ├── ecto-nested-associations.instructions.md
-│   │   ├── phoenix-liveview-essentials.instructions.md
-│   │   ├── phoenix-liveview-auth.instructions.md
-│   │   ├── phoenix-uploads.instructions.md
+│   │   ├── ecto-queries-performance.instructions.md
+│   │   ├── elixir-essentials.instructions.md
+│   │   ├── http-clients-req.instructions.md
+│   │   ├── oban-essentials.instructions.md
+│   │   ├── otp-essentials.instructions.md
 │   │   ├── phoenix-auth-customization.instructions.md
-│   │   ├── phoenix-pubsub-patterns.instructions.md
 │   │   ├── phoenix-authorization-patterns.instructions.md
 │   │   ├── phoenix-channels-essentials.instructions.md
 │   │   ├── phoenix-json-api.instructions.md
-│   │   ├── testing-essentials.instructions.md
-│   │   ├── otp-essentials.instructions.md
-│   │   ├── oban-essentials.instructions.md
-│   │   ├── code-quality.instructions.md
+│   │   ├── phoenix-liveview-auth.instructions.md
+│   │   ├── phoenix-liveview-essentials.instructions.md
+│   │   ├── phoenix-pubsub-patterns.instructions.md
+│   │   ├── phoenix-scopes-and-generators.instructions.md
+│   │   ├── phoenix-tailwind-daisyui.instructions.md
+│   │   ├── phoenix-uploads.instructions.md
 │   │   ├── security-essentials.instructions.md
-│   │   ├── deployment-gotchas.instructions.md
-│   │   └── telemetry-essentials.instructions.md
+│   │   ├── telemetry-essentials.instructions.md
+│   │   └── testing-essentials.instructions.md
 │   └── hooks/
 │       └── elixir-guard.json            # Hook configuration
 ├── hooks/
@@ -63,31 +68,36 @@ your-project/
 
 ## What's Included
 
-### 19 Instructions
+### 24 Instructions
 
 Each instruction is automatically loaded by Copilot when you edit files matching its `applyTo` pattern.
 
 | Instruction | Applies To |
 |-------------|-----------|
+| `code-quality` | `**/.credo.exs` |
+| `deployment-gotchas` | `**/config/**/*.exs,**/rel/**/*,**/Dockerfile,**/release.ex` |
+| `ecto-changeset-patterns` | `**/lib/*/*/*.ex` |
+| `ecto-essentials` | `**/lib/*/*.ex,**/lib/*/*/*.ex,**/priv/repo/migrations/*.exs,**/repo.ex` |
+| `ecto-migrations-safety` | `**/priv/repo/migrations/**/*.exs,**/priv/repo/data_migrations/**/*.exs,**/priv/*/migrations/**/*.exs` |
+| `ecto-nested-associations` | `**/lib/*/*/*.ex,**/lib/*/*.ex` |
+| `ecto-queries-performance` | `**/lib/*/*.ex` |
 | `elixir-essentials` | `**/*.ex,**/*.exs` |
-| `ecto-essentials` | `**/*.ex,**/*.exs` |
-| `ecto-changeset-patterns` | `**/*.ex,**/*.exs` |
-| `ecto-nested-associations` | `**/*.ex,**/*.exs` |
-| `phoenix-liveview-essentials` | `**/live/**/*.ex,**/*_live.ex,**/*.html.heex,**/live/**/*.html.heex` |
-| `phoenix-liveview-auth` | `**/live/**/*.ex,**/*_live.ex` |
-| `phoenix-uploads` | `**/live/**/*.ex,**/*_live.ex` |
-| `phoenix-auth-customization` | `**/*.ex,**/*.exs` |
-| `phoenix-pubsub-patterns` | `**/*.ex` |
-| `phoenix-authorization-patterns` | `**/*.ex` |
-| `phoenix-channels-essentials` | `**/*.ex` |
-| `phoenix-json-api` | `**/*.ex` |
-| `testing-essentials` | `**/*_test.exs,**/test/**/*.exs` |
-| `otp-essentials` | `**/*.ex` |
-| `oban-essentials` | `**/*.ex` |
-| `code-quality` | `**/*.ex,**/*.exs,**/*.html.heex` |
-| `security-essentials` | `**/*.ex,**/*.exs` |
-| `deployment-gotchas` | `**/config/**/*.exs,**/rel/**/*,**/Dockerfile` |
-| `telemetry-essentials` | `**/*.ex` |
+| `http-clients-req` | `**/*_client.ex,**/clients/**/*.ex,**/*_api.ex,**/*http*.ex,**/*_client_test.exs,**/*_api_test.exs` |
+| `oban-essentials` | `**/workers/**/*.ex,**/*_worker.ex,**/*_job.ex` |
+| `otp-essentials` | `**/application.ex,**/*server*.ex,**/*supervisor*.ex,**/*registry*.ex,**/*worker*.ex,**/*cache*.ex` |
+| `phoenix-auth-customization` | `**/accounts.ex,**/accounts/*.ex,**/live/user_live/**/*.ex,**/*accounts_fixtures.ex` |
+| `phoenix-authorization-patterns` | `**/lib/*/*.ex,**/scope.ex,**/live/**/*.ex,**/controllers/**/*.ex` |
+| `phoenix-channels-essentials` | `**/channels/**/*.ex,**/*_socket.ex,**/*_channel.ex,**/presence.ex` |
+| `phoenix-json-api` | `**/controllers/**/*.ex,**/router.ex` |
+| `phoenix-liveview-auth` | `**/user_auth.ex,**/router.ex,**/live/user_live/**/*.ex` |
+| `phoenix-liveview-essentials` | `**/live/**/*.ex,**/*_live.ex,**/*.heex,**/components/**/*.ex` |
+| `phoenix-pubsub-patterns` | `**/live/**/*.ex,**/lib/*/*.ex` |
+| `phoenix-scopes-and-generators` | `**/config/config.exs,**/scope.ex,**/*_scope.ex,**/user_auth.ex,**/test/support/conn_case.ex,**/*accounts_fixtures.ex` |
+| `phoenix-tailwind-daisyui` | `**/assets/css/**/*.css,**/components/**/*.ex,**/*.html.heex` |
+| `phoenix-uploads` | `**/live/**/*.ex,**/*upload*.ex,**/controllers/**/*download*.ex` |
+| `security-essentials` | `**/controllers/**/*.ex,**/live/**/*.ex,**/*.heex,**/router.ex,**/endpoint.ex,**/lib/*/*.ex,**/config/runtime.exs` |
+| `telemetry-essentials` | `**/telemetry.ex,**/endpoint.ex,**/config/*.exs` |
+| `testing-essentials` | `**/*_test.exs,**/test/**/*.exs,**/test/support/**/*.ex` |
 
 ### Hooks (7 PreToolUse checks + 10 PostToolUse checks)
 

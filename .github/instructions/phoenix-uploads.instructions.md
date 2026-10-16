@@ -1,5 +1,5 @@
 ---
-applyTo: "**/live/**/*.ex,**/*_live.ex"
+applyTo: "**/live/**/*.ex,**/*upload*.ex,**/controllers/**/*download*.ex"
 ---
 
 # Phoenix File Uploads

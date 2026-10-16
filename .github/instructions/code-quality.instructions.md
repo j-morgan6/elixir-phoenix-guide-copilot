@@ -1,5 +1,5 @@
 ---
-applyTo: "**/*.ex,**/*.exs,**/*.html.heex"
+applyTo: "**/.credo.exs"
 ---
 
 # Code Quality

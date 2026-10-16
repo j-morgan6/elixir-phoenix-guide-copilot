@@ -1,5 +1,5 @@
 ---
-applyTo: "**/*.ex"
+applyTo: "**/application.ex,**/*server*.ex,**/*supervisor*.ex,**/*registry*.ex,**/*worker*.ex,**/*cache*.ex"
 ---
 
 # OTP Essentials
